@@ -1,73 +1,101 @@
-"""Ingest NOAA FOSS commercial fisheries landings data.
-
-This node downloads commercial fisheries landings data from the NOAA FOSS API.
-Data is fetched year by year from 1950 to present.
-"""
+"""NOAA FOSS commercial fisheries landings data (1950-present)."""
 from datetime import datetime
-from subsets_utils import get, save_raw_json, load_state, save_state
+import pyarrow as pa
+from connector_utils import fetch_paginated
+from subsets_utils import save_raw_json, load_raw_json, load_state, save_state, overwrite, publish, data_hash
 
-BASE_URL = "https://apps-st.fisheries.noaa.gov/ods/foss/landings"
+DATASET_ID = "noaa_fisheries_landings"
+
+METADATA = {
+    "id": DATASET_ID,
+    "title": "NOAA Commercial Fisheries Landings",
+    "description": "Commercial and recreational fisheries landings in the United States (1950-present). Covers weight, value, and count of fish landed by species, state, and data source.",
+    "license": "US Government Public Domain",
+    "column_descriptions": {
+        "year": "Year of landing",
+        "tsn": "ITIS Taxonomic Serial Number",
+        "species_name": "Common species name (AFS standard)",
+        "scientific_name": "Scientific name",
+        "region": "NOAA fisheries region",
+        "state": "US state",
+        "pounds": "Weight landed in pounds",
+        "dollars": "Value in US dollars",
+        "count": "Total count of fish",
+        "source": "Data source (e.g. MRIP, state/federal agencies)",
+        "collection": "Collection type (Commercial or Recreational)",
+    },
+}
 
 
-def run():
-    """Fetch commercial fisheries landings data from NOAA FOSS API."""
-    print("Processing landings data...")
-
+def download():
     state = load_state("landings")
     completed_years = set(state.get("completed_years", []))
 
-    # FOSS has data from 1950-present
-    # Fetch year by year to avoid large payloads
     current_year = datetime.now().year
-    years = list(range(1950, current_year + 1))
-    pending_years = [y for y in years if y not in completed_years]
+    pending_years = [y for y in range(1950, current_year + 1) if y not in completed_years]
 
     if not pending_years:
-        print("  All years already fetched")
+        print("  All landings years already fetched")
         return
 
-    print(f"  Fetching {len(pending_years)} years...")
-
+    print(f"  Fetching {len(pending_years)} landings years...")
     for i, year in enumerate(pending_years, 1):
-        print(f"  [{i}/{len(pending_years)}] Fetching {year}...")
-
-        # API has max 10000 records per request, need to paginate
-        all_items = []
-        offset = 0
-        limit = 10000
-        page = 1
-
-        while True:
-            response = get(f"{BASE_URL}?q={{\"year\":\"{year}\"}}&limit={limit}&offset={offset}")
-            data = response.json()
-
-            items = data.get("items", [])
-            all_items.extend(items)
-
-            if page > 1:
-                print(f"    page {page}: {len(items)} records (total: {len(all_items)})")
-
-            if not data.get("hasMore", False):
-                break
-
-            offset += limit
-            page += 1
-
-        save_raw_json(all_items, f"landings/{year}")
-        print(f"    -> {len(all_items)} records")
+        print(f"  [{i}/{len(pending_years)}] Fetching landings {year}...")
+        items = fetch_paginated("landings", {"year": str(year)})
+        save_raw_json(items, f"landings/{year}")
+        print(f"    -> {len(items)} records")
 
         completed_years.add(year)
-        save_state("landings", {"completed_years": list(completed_years)})
+        save_state("landings", {"completed_years": sorted(completed_years)})
 
-    print("  Done!")
+
+def transform():
+    state = load_state("landings")
+    completed_years = state.get("completed_years", [])
+    if not completed_years:
+        print("  No landings data to transform")
+        return
+
+    tables = []
+    for year in sorted(completed_years):
+        raw = load_raw_json(f"landings/{year}")
+        rows = [{
+            "year": r["year"],
+            "tsn": r.get("tsn"),
+            "species_name": r.get("ts_afs_name"),
+            "scientific_name": r.get("ts_scientific_name"),
+            "region": r.get("region_name"),
+            "state": r.get("state_name"),
+            "pounds": r.get("pounds"),
+            "dollars": r.get("dollars"),
+            "count": r.get("tot_count"),
+            "source": r.get("source"),
+            "collection": r.get("collection"),
+        } for r in raw]
+        if rows:
+            tables.append(pa.Table.from_pylist(rows))
+
+    table = pa.concat_tables(tables)
+    print(f"  Loaded {len(table):,} landings records")
+
+    h = data_hash(table)
+    if load_state(DATASET_ID).get("hash") == h:
+        print(f"  Skipping {DATASET_ID} - unchanged")
+        return
+
+    overwrite(table, DATASET_ID)
+    publish(DATASET_ID, METADATA)
+    save_state(DATASET_ID, {"hash": h})
+    print(f"  Published {len(table):,} landings records")
 
 
 NODES = {
-    run: [],
+    download: [],
+    transform: [download],
 }
-
 
 if __name__ == "__main__":
     from subsets_utils import validate_environment
     validate_environment()
-    run()
+    download()
+    transform()

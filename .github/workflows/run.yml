@@ -2,6 +2,19 @@ name: Run Connector
 on:
   workflow_dispatch:
     inputs:
+      dag_target:
+        description: 'Run specific DAG nodes (comma-separated)'
+        required: false
+        type: string
+      dag_on_failure:
+        description: 'Failure behavior: crash (default) or continue'
+        required: false
+        type: string
+        default: 'crash'
+      run_id:
+        description: 'Run ID for grouping continuation invocations'
+        required: false
+        type: string
 
 jobs:
   run:
@@ -29,3 +42,4 @@ jobs:
         R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
         DAG_TARGET: ${{ inputs.dag_target }}
         DAG_ON_FAILURE: ${{ inputs.dag_on_failure }}
+        RUN_ID: ${{ inputs.run_id }}
